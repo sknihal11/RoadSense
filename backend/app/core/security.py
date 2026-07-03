@@ -1,6 +1,14 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union
 from jose import jwt
+
+import bcrypt
+# Monkey-patch bcrypt to satisfy passlib's check in Python 3.12+
+if not hasattr(bcrypt, "__about__"):
+  class About:
+    __version__ = bcrypt.__version__
+  bcrypt.__about__ = About()
+
 from passlib.context import CryptContext
 from app.core.config import settings
 
