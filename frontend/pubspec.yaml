@@ -1,0 +1,33 @@
+name: roadsense_ai
+description: A production-quality AI-powered navigation platform with road monitoring.
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.2.0
+  dio: ^5.5.0+1
+  geolocator: ^12.0.0
+  flutter_map: ^6.1.0
+  latlong2: ^0.9.0
+  camera: ^0.11.0
+  tflite_flutter: ^0.12.1
+  image: ^4.1.3
+  shared_preferences: ^2.2.3
+  path_provider: ^2.1.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/models/
