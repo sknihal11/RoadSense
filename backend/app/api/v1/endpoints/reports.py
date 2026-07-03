@@ -4,10 +4,10 @@ import os
 from typing import List
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status, HTTPException
 from sqlalchemy.orm import Session
-from ....crud.report import create_report, get_reports, delete_report
-from ....models.user import User
-from ....schemas.report import ReportCreate, ReportResponse
-from ..deps import get_db, get_current_user
+from app.crud.report import create_report, get_reports, delete_report
+from app.models.user import User
+from app.schemas.report import ReportCreate, ReportResponse
+from app.api.v1.deps import get_db, get_current_user
 
 router = APIRouter()
 

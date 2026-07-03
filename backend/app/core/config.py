@@ -11,9 +11,11 @@ class Settings:
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
 
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        "sqlite:///./roadsense.db"
-    )
+    @property
+    def DATABASE_URL(self) -> str:
+        url = os.getenv("DATABASE_URL", "sqlite:///./roadsense.db")
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+pg8000://", 1)
+        return url
 
 settings = Settings()

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from ....crud.report import update_report_verification, get_report_by_id
-from ....schemas.report import ReportResponse, ReportUpdate
-from ....models.user import User
-from ..deps import get_db, get_current_user
+from app.crud.report import update_report_verification, get_report_by_id
+from app.schemas.report import ReportResponse, ReportUpdate
+from app.models.user import User
+from app.api.v1.deps import get_db, get_current_user
 
 router = APIRouter()
 

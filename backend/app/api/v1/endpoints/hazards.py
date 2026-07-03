@@ -1,9 +1,9 @@
 from typing import List
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from ....crud.report import get_verified_reports
-from ....schemas.report import HazardMapResponse
-from ..deps import get_db
+from app.crud.report import get_verified_reports
+from app.schemas.report import HazardMapResponse
+from app.api.v1.deps import get_db
 
 router = APIRouter()
 

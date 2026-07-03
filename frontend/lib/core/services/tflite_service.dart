@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'dart:isolate';
 import 'dart:ui';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
@@ -55,6 +56,7 @@ class TfliteService {
     try {
       // Configure options (use GPU delegate where available)
       final options = InterpreterOptions();
+      options.threads = 4;
       if (defaultTargetPlatform == TargetPlatform.android) {
         options.useNnApiForAndroid = true;
       }
@@ -89,180 +91,36 @@ class TfliteService {
       final inputShape = _interpreter!.getInputTensor(0).shape;
       final outputShape = _interpreter!.getOutputTensor(0).shape;
 
-      // 1. Preprocess CameraImage bytes into YOLOv8 input tensor format
-      final stopwatch = Stopwatch()..start();
-      final inputBuffer = _preprocessCameraImage(image, inputShape);
-      final preprocessTime = stopwatch.elapsedMilliseconds;
+      // Transfer plane bytes zero-copy using TransferableTypedData
+      final transferablePlanes = image.planes
+          .map((p) => TransferableTypedData.fromList([p.bytes]))
+          .toList();
 
-      // 2. Prepare output tensor structures
-      final outputs = {
-        0: List.generate(
-          outputShape[0],
-          (_) => List.generate(
-            outputShape[1],
-            (_) => List.filled(outputShape[2], 0.0),
-          ),
-        ),
-      };
-
-      // 3. Execute interpreter
-      stopwatch.reset();
-      _interpreter!.runForMultipleInputs([inputBuffer], outputs);
-      final inferenceTime = stopwatch.elapsedMilliseconds;
-
-      // 4. Determine input width/height to normalize coordinates correctly
-      int modelInputHeight = 640;
-      int modelInputWidth = 640;
-      if (inputShape.length == 4) {
-        if (inputShape[1] == 3) {
-          modelInputHeight = inputShape[2];
-          modelInputWidth = inputShape[3];
-        } else {
-          modelInputHeight = inputShape[1];
-          modelInputWidth = inputShape[2];
-        }
-      }
-
-      // 5. Decode the outputs with associated metadata
-      final List<Detection> detections = _decodeYoloOutput(
-        outputs[0]![0],
-        image.width,
-        image.height,
-        metadata,
-        modelInputWidth,
-        modelInputHeight,
+      final args = InferenceIsolateArgs(
+        planeBytes: transferablePlanes,
+        planeBytesPerRow: image.planes.map((p) => p.bytesPerRow).toList(),
+        planeBytesPerPixel: image.planes.map((p) => p.bytesPerPixel).toList(),
+        width: image.width,
+        height: image.height,
+        inputShape: inputShape,
+        outputShape: outputShape,
+        modelAssetPath: 'assets/models/yolov8n.tflite',
+        metadata: metadata,
       );
 
-      debugPrint('AI Inference Stats - Model: $_modelName, Preprocess: ${preprocessTime}ms, Inference: ${inferenceTime}ms, Total: ${preprocessTime + inferenceTime}ms');
+      final stopwatch = Stopwatch()..start();
+      final List<Detection> detections = await compute(runYoloInferenceIsolate, args);
+      final totalTime = stopwatch.elapsedMilliseconds;
+
+      debugPrint('AI Background Isolate Inference Stats - Total: ${totalTime}ms, Detections: ${detections.length}');
       return detections;
     } catch (e) {
-      debugPrint('Error running TFLite inference: $e');
+      debugPrint('Error running background TFLite inference: $e');
       return [];
     }
   }
 
-  /// Preprocesses CameraImage into a normalized list matching the input tensor shape [1, H, W, 3] or [1, 3, H, W]
-  dynamic _preprocessCameraImage(CameraImage image, List<int> inputShape) {
-    int inputHeight = 640;
-    int inputWidth = 640;
-    bool isChannelsFirst = false;
-    
-    if (inputShape.length == 4) {
-      if (inputShape[1] == 3) {
-        isChannelsFirst = true;
-        inputHeight = inputShape[2];
-        inputWidth = inputShape[3];
-      } else {
-        inputHeight = inputShape[1];
-        inputWidth = inputShape[2];
-      }
-    }
-    
-    final width = image.width;
-    final height = image.height;
-    
-    final double scaleX = width / inputWidth;
-    final double scaleY = height / inputHeight;
-    
-    final int size = inputHeight * inputWidth * 3;
-    final Float32List float32list = Float32List(size);
-    int idx = 0;
-    
-    if (image.planes.length >= 3) {
-      // YUV420 format (Android)
-      final yPlane = image.planes[0];
-      final uPlane = image.planes[1];
-      final vPlane = image.planes[2];
-      
-      final yBuffer = yPlane.bytes;
-      final uBuffer = uPlane.bytes;
-      final vBuffer = vPlane.bytes;
-      
-      final yRowStride = yPlane.bytesPerRow;
-      final uRowStride = uPlane.bytesPerRow;
-      final vRowStride = vPlane.bytesPerRow;
-      
-      final yPixelStride = yPlane.bytesPerPixel ?? 1;
-      final uPixelStride = uPlane.bytesPerPixel ?? 2;
-      final vPixelStride = vPlane.bytesPerPixel ?? 2;
-      
-      for (int y = 0; y < inputHeight; y++) {
-        final int srcY = (y * scaleY).toInt().clamp(0, height - 1);
-        final int yRowOffset = srcY * yRowStride;
-        final int uvY = srcY >> 1;
-        final int uRowOffset = uvY * uRowStride;
-        final int vRowOffset = uvY * vRowStride;
-        
-        for (int x = 0; x < inputWidth; x++) {
-          final int srcX = (x * scaleX).toInt().clamp(0, width - 1);
-          final int yIndexInPlane = yRowOffset + srcX * yPixelStride;
-          final int yValue = yIndexInPlane < yBuffer.length ? yBuffer[yIndexInPlane] : 128;
-          
-          final int uvX = srcX >> 1;
-          final int uIndexInPlane = uRowOffset + uvX * uPixelStride;
-          final int vIndexInPlane = vRowOffset + uvX * vPixelStride;
-          
-          final int uValue = uIndexInPlane < uBuffer.length ? uBuffer[uIndexInPlane] : 128;
-          final int vValue = vIndexInPlane < vBuffer.length ? vBuffer[vIndexInPlane] : 128;
-          
-          final double r = ((yValue + 1.402 * (vValue - 128)).clamp(0, 255)) / 255.0;
-          final double g = ((yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128)).clamp(0, 255)) / 255.0;
-          final double b = ((yValue + 1.772 * (uValue - 128)).clamp(0, 255)) / 255.0;
-          
-          if (isChannelsFirst) {
-            float32list[y * inputWidth + x] = r;
-            float32list[inputHeight * inputWidth + y * inputWidth + x] = g;
-            float32list[2 * inputHeight * inputWidth + y * inputWidth + x] = b;
-          } else {
-            float32list[idx++] = r;
-            float32list[idx++] = g;
-            float32list[idx++] = b;
-          }
-        }
-      }
-    } else if (image.planes.length == 1) {
-      // BGRA8888 or RGBA8888 (iOS / Simulator)
-      final plane = image.planes[0];
-      final buffer = plane.bytes;
-      final rowStride = plane.bytesPerRow;
-      final pixelStride = plane.bytesPerPixel ?? 4;
-      
-      for (int y = 0; y < inputHeight; y++) {
-        final int srcY = (y * scaleY).toInt().clamp(0, height - 1);
-        final int rowOffset = srcY * rowStride;
-        for (int x = 0; x < inputWidth; x++) {
-          final int srcX = (x * scaleX).toInt().clamp(0, width - 1);
-          final int index = rowOffset + srcX * pixelStride;
-          
-          double r = 0.5;
-          double g = 0.5;
-          double b = 0.5;
-          
-          if (index < buffer.length - 2) {
-            b = buffer[index] / 255.0;
-            g = buffer[index + 1] / 255.0;
-            r = buffer[index + 2] / 255.0;
-          }
-          
-          if (isChannelsFirst) {
-            float32list[y * inputWidth + x] = r;
-            float32list[inputHeight * inputWidth + y * inputWidth + x] = g;
-            float32list[2 * inputHeight * inputWidth + y * inputWidth + x] = b;
-          } else {
-            float32list[idx++] = r;
-            float32list[idx++] = g;
-            float32list[idx++] = b;
-          }
-        }
-      }
-    }
-    
-    if (isChannelsFirst) {
-      return float32list.reshape([1, 3, inputHeight, inputWidth]);
-    } else {
-      return float32list.reshape([1, inputHeight, inputWidth, 3]);
-    }
-  }
+  // Synchronous preprocessing has been moved to a background Isolate for UI responsiveness.
 
   /// Decodes YOLOv8 outputs containing coordinates and classes dynamically
   List<Detection> _decodeYoloOutput(
@@ -379,4 +237,259 @@ class TfliteService {
   void dispose() {
     _interpreter?.close();
   }
+}
+
+/// Arguments container for running the entire YOLOv8 model inference chain on a background Isolate
+class InferenceIsolateArgs {
+  final List<TransferableTypedData> planeBytes;
+  final List<int> planeBytesPerRow;
+  final List<int?> planeBytesPerPixel;
+  final int width;
+  final int height;
+  final List<int> inputShape;
+  final List<int> outputShape;
+  final String modelAssetPath;
+  final FrameMetadata metadata;
+
+  InferenceIsolateArgs({
+    required this.planeBytes,
+    required this.planeBytesPerRow,
+    required this.planeBytesPerPixel,
+    required this.width,
+    required this.height,
+    required this.inputShape,
+    required this.outputShape,
+    required this.modelAssetPath,
+    required this.metadata,
+  });
+}
+
+/// Runs YUV scaling, normalization, TFLite execution, and output decoding on a background Isolate (zero-copy)
+Future<List<Detection>> runYoloInferenceIsolate(InferenceIsolateArgs args) async {
+  // 1. Materialize plane bytes instantly (zero-copy)
+  final materializedPlanes = args.planeBytes.map((t) => t.materialize().asUint8List()).toList();
+  
+  // 2. Perform preprocessing (scaling and color space conversion)
+  int inputHeight = 640;
+  int inputWidth = 640;
+  bool isChannelsFirst = false;
+  
+  if (args.inputShape.length == 4) {
+    if (args.inputShape[1] == 3) {
+      isChannelsFirst = true;
+      inputHeight = args.inputShape[2];
+      inputWidth = args.inputShape[3];
+    } else {
+      inputHeight = args.inputShape[1];
+      inputWidth = args.inputShape[2];
+    }
+  }
+  
+  final double scaleX = args.width / inputWidth;
+  final double scaleY = args.height / inputHeight;
+  
+  final int size = inputHeight * inputWidth * 3;
+  final Float32List float32list = Float32List(size);
+  int idx = 0;
+  
+  if (materializedPlanes.length >= 3) {
+    // YUV420 format (Android)
+    final yBuffer = materializedPlanes[0];
+    final uBuffer = materializedPlanes[1];
+    final vBuffer = materializedPlanes[2];
+    
+    final yRowStride = args.planeBytesPerRow[0];
+    final uRowStride = args.planeBytesPerRow[1];
+    final vRowStride = args.planeBytesPerRow[2];
+    
+    final yPixelStride = args.planeBytesPerPixel[0] ?? 1;
+    final uPixelStride = args.planeBytesPerPixel[1] ?? 2;
+    final vPixelStride = args.planeBytesPerPixel[2] ?? 2;
+    
+    for (int y = 0; y < inputHeight; y++) {
+      final int srcY = (y * scaleY).toInt().clamp(0, args.height - 1);
+      final int yRowOffset = srcY * yRowStride;
+      final int uvY = srcY >> 1;
+      final int uRowOffset = uvY * uRowStride;
+      final int vRowOffset = uvY * vRowStride;
+      
+      for (int x = 0; x < inputWidth; x++) {
+        final int srcX = (x * scaleX).toInt().clamp(0, args.width - 1);
+        final int yIndexInPlane = yRowOffset + srcX * yPixelStride;
+        final int yValue = yIndexInPlane < yBuffer.length ? yBuffer[yIndexInPlane] : 128;
+        
+        final int uvX = srcX >> 1;
+        final int uIndexInPlane = uRowOffset + uvX * uPixelStride;
+        final int vIndexInPlane = vRowOffset + uvX * vPixelStride;
+        
+        final int uValue = uIndexInPlane < uBuffer.length ? uBuffer[uIndexInPlane] : 128;
+        final int vValue = vIndexInPlane < vBuffer.length ? vBuffer[vIndexInPlane] : 128;
+        
+        // Fast integer math color space conversion:
+        final int rVal = (yValue + ((1435 * (vValue - 128)) >> 10)).clamp(0, 255);
+        final int gVal = (yValue - ((352 * (uValue - 128) + 731 * (vValue - 128)) >> 10)).clamp(0, 255);
+        final int bVal = (yValue + ((1814 * (uValue - 128)) >> 10)).clamp(0, 255);
+        
+        final double r = rVal / 255.0;
+        final double g = gVal / 255.0;
+        final double b = bVal / 255.0;
+        
+        if (isChannelsFirst) {
+          float32list[y * inputWidth + x] = r;
+          float32list[inputHeight * inputWidth + y * inputWidth + x] = g;
+          float32list[2 * inputHeight * inputWidth + y * inputWidth + x] = b;
+        } else {
+          float32list[idx++] = r;
+          float32list[idx++] = g;
+          float32list[idx++] = b;
+        }
+      }
+    }
+  } else if (materializedPlanes.length == 1) {
+    // BGRA8888 or RGBA8888 (iOS / Simulator)
+    final bytes = materializedPlanes[0];
+    final rowStride = args.planeBytesPerRow[0];
+    final pixelStride = args.planeBytesPerPixel[0] ?? 4;
+    
+    for (int y = 0; y < inputHeight; y++) {
+      final int srcY = (y * scaleY).toInt().clamp(0, args.height - 1);
+      final int rowOffset = srcY * rowStride;
+      for (int x = 0; x < inputWidth; x++) {
+        final int srcX = (x * scaleX).toInt().clamp(0, args.width - 1);
+        final int index = rowOffset + srcX * pixelStride;
+        
+        double r = 0.5;
+        double g = 0.5;
+        double b = 0.5;
+        
+        if (index < bytes.length - 2) {
+          b = bytes[index] / 255.0;
+          g = bytes[index + 1] / 255.0;
+          r = bytes[index + 2] / 255.0;
+        }
+        
+        if (isChannelsFirst) {
+          float32list[y * inputWidth + x] = r;
+          float32list[inputHeight * inputWidth + y * inputWidth + x] = g;
+          float32list[2 * inputHeight * inputWidth + y * inputWidth + x] = b;
+        } else {
+          float32list[idx++] = r;
+          float32list[idx++] = g;
+          float32list[idx++] = b;
+        }
+      }
+    }
+  }
+  
+  dynamic inputBuffer;
+  if (isChannelsFirst) {
+    inputBuffer = float32list.reshape([1, 3, inputHeight, inputWidth]);
+  } else {
+    inputBuffer = float32list.reshape([1, inputHeight, inputWidth, 3]);
+  }
+
+  // 3. Load interpreter inside the background isolate thread
+  final options = InterpreterOptions();
+  options.threads = 4;
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    options.useNnApiForAndroid = true;
+  }
+  final interpreter = await Interpreter.fromAsset(args.modelAssetPath, options: options);
+  
+  // 4. Prepare output tensor structures
+  final outputs = {
+    0: List.generate(
+      args.outputShape[0],
+      (_) => List.generate(
+        args.outputShape[1],
+        (_) => List.filled(args.outputShape[2], 0.0),
+      ),
+    ),
+  };
+  
+  // 5. Execute model
+  interpreter.runForMultipleInputs([inputBuffer], outputs);
+  interpreter.close();
+  
+  // 6. Decode output
+  final List<Detection> detections = [];
+  final List<List<double>> outputTensor = outputs[0]![0];
+  final numPredictions = outputTensor[0].length;
+  final numClasses = outputTensor.length - 4;
+  
+  if (numClasses >= 80) {
+    return []; // COCO model safety block
+  }
+  
+  for (int i = 0; i < numPredictions; i++) {
+    double bestScore = 0.0;
+    int bestClassIdx = -1;
+    for (int c = 0; c < numClasses; c++) {
+      final double score = outputTensor[c + 4][i];
+      if (score > bestScore) {
+        bestScore = score;
+        bestClassIdx = c;
+      }
+    }
+    if (bestScore >= 0.45 && bestClassIdx != -1) {
+      final double xCenter = outputTensor[0][i];
+      final double yCenter = outputTensor[1][i];
+      final double w = outputTensor[2][i];
+      final double h = outputTensor[3][i];
+      
+      final double left = (xCenter - w / 2) / inputWidth;
+      final double top = (yCenter - h / 2) / inputHeight;
+      final double width = w / inputWidth;
+      final double height = h / inputHeight;
+      
+      String label = 'pothole';
+      if (numClasses == 1) {
+        label = 'pothole';
+      } else if (bestClassIdx == 0) {
+        label = 'pothole';
+      } else if (bestClassIdx == 1) {
+        label = 'crack';
+      }
+      
+      final double lat = args.metadata.latitude + (top + height / 2 - 0.5) * 0.0001;
+      final double lng = args.metadata.longitude + (left + width / 2 - 0.5) * 0.0001;
+      
+      detections.add(Detection(
+        rect: Rect.fromLTWH(left, top, width, height),
+        confidence: bestScore,
+        label: label,
+        latitude: lat,
+        longitude: lng,
+        timestamp: args.metadata.timestamp,
+      ));
+    }
+  }
+
+  // 7. Apply Non-Max Suppression (NMS)
+  detections.sort((a, b) => b.confidence.compareTo(a.confidence));
+  final List<Detection> activeDetections = [];
+  for (final detection in detections) {
+    bool keep = true;
+    for (final active in activeDetections) {
+      final r1 = detection.rect;
+      final r2 = active.rect;
+      final intersection = r1.intersect(r2);
+      double iou = 0.0;
+      if (intersection.width > 0 && intersection.height > 0) {
+        final intersectionArea = intersection.width * intersection.height;
+        final unionArea = (r1.width * r1.height) + (r2.width * r2.height) - intersectionArea;
+        iou = intersectionArea / unionArea;
+      }
+      if (iou > 0.5) {
+        keep = false;
+        break;
+      }
+    }
+    if (keep) {
+      activeDetections.add(detection);
+    }
+    if (activeDetections.length >= 5) break;
+  }
+  
+  return activeDetections;
 }

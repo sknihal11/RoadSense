@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from .config import settings
+from app.core.config import settings
 
 # Create database engine
 connect_args = {}

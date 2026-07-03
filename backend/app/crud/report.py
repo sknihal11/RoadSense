@@ -1,7 +1,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from ..models.report import Report
-from ..schemas.report import ReportCreate
+from app.models.report import Report
+from app.schemas.report import ReportCreate
 
 def get_report_by_id(db: Session, report_id: int) -> Optional[Report]:
   return db.query(Report).filter(Report.id == report_id).first()

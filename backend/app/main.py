@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .core.config import settings
+from app.core.config import settings
 from datetime import datetime
 from sqlalchemy.orm import Session
-from .core.database import Base, engine, SessionLocal
-from .models.report import Report
-from .api.v1.api import api_router
+from app.core.database import Base, engine, SessionLocal
+from app.models.report import Report
+from app.api.v1.api import api_router
 
 # As a helper for initial developer testing without needing manual migrations,
 # we create all database schema tables on startup automatically if they don't exist.
