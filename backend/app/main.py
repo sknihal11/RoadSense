@@ -7,9 +7,7 @@ from app.core.database import Base, engine, SessionLocal
 from app.models.report import Report
 from app.api.v1.api import api_router
 
-# As a helper for initial developer testing without needing manual migrations,
-# we create all database schema tables on startup automatically if they don't exist.
-Base.metadata.create_all(bind=engine)
+# Database setup is handled dynamically during the application startup event.
 
 def seed_database():
   db: Session = SessionLocal()
@@ -73,8 +71,6 @@ def seed_database():
   finally:
     db.close()
 
-seed_database()
-
 app = FastAPI(
   title=settings.PROJECT_NAME,
   description="Backend REST API for RoadSense AI safe navigation and road quality reporting.",
@@ -83,6 +79,22 @@ app = FastAPI(
   docs_url="/docs", # Swagger UI endpoint
   redoc_url="/redoc"
 )
+
+@app.on_event("startup")
+def startup_event():
+  import os
+  is_vercel = os.getenv("VERCEL") is not None
+  is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+  
+  if is_vercel and is_sqlite:
+    print("Running on Vercel with SQLite fallback. Skipping local database creation to prevent read-only filesystem crash.")
+    return
+      
+  try:
+    Base.metadata.create_all(bind=engine)
+    seed_database()
+  except Exception as e:
+    print(f"Database setup deferred or failed: {e}")
 
 # Set CORS origins
 app.add_middleware(
