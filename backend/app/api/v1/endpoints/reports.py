@@ -11,8 +11,9 @@ from app.api.v1.deps import get_db, get_current_user
 
 router = APIRouter()
 
-# Directory to save uploaded evidence files locally (mock file storage path)
-UPLOAD_DIR = "uploads/evidence"
+# Directory to save uploaded evidence files locally (writeable /tmp on Vercel)
+is_vercel = os.getenv("VERCEL") is not None
+UPLOAD_DIR = "/tmp/uploads/evidence" if is_vercel else "uploads/evidence"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/upload", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
