@@ -1,4 +1,8 @@
 import sys
+import os
+
+# Add the parent directory (backend root) to PYTHONPATH so absolute imports resolve correctly
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 1. Mock 'crypt' module for Python 3.12+ compatibility in Vercel's serverless environment
 try:
